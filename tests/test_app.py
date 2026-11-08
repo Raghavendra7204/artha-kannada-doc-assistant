@@ -31,6 +31,8 @@ class AppTests(unittest.TestCase):
         with (
             patch("ocr.prepare_image", return_value=b"prepared"),
             patch("ocr.run_ocr", return_value=ocr_result) as run_ocr,
+            patch("summarizer.summarize_letter", return_value="ಕನ್ನಡ ಸಾರಾಂಶ"),
+            patch("tts.synthesize_speech", return_value=b"audio"),
         ):
             app = AppTest.from_file(str(APP_PATH)).run(timeout=15)
             app.file_uploader[0].upload(
@@ -38,17 +40,14 @@ class AppTests(unittest.TestCase):
             )
             app.run(timeout=15)
             self.assertEqual(
-                [button.label for button in app.button], ["Read text"]
+                [button.label for button in app.button], ["ಪಠ್ಯ ಓದಿ"]
             )
             run_ocr.assert_not_called()
 
             app.button[0].click().run(timeout=15)
             run_ocr.assert_called_once_with(b"prepared")
 
-            with patch(
-                "summarizer.summarize_letter", return_value="ಕನ್ನಡ ಸಾರಾಂಶ"
-            ):
-                app.button[1].click().run(timeout=15)
+            app.button[1].click().run(timeout=15)
             run_ocr.assert_called_once()
 
     def test_summary_is_displayed_and_downloadable(self):
@@ -60,12 +59,15 @@ class AppTests(unittest.TestCase):
         }
         app.run(timeout=15)
 
-        with patch("summarizer.summarize_letter", return_value="ಕನ್ನಡ ಸಾರಾಂಶ"):
+        with (
+            patch("summarizer.summarize_letter", return_value="ಕನ್ನಡ ಸಾರಾಂಶ"),
+            patch("tts.synthesize_speech", return_value=b"audio"),
+        ):
             app.button[0].click().run(timeout=15)
 
-        self.assertIn("ಕನ್ನಡ ಸಾರಾಂಶ", [area.value for area in app.text_area])
+        self.assertIn("ಕನ್ನಡ ಸಾರಾಂಶ", [item.value for item in app.markdown])
         download_labels = [button.label for button in app.get("download_button")]
-        self.assertIn("ಸಾರಾಂಶವನ್ನು UTF-8 ಪಠ್ಯವಾಗಿ ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ", download_labels)
+        self.assertIn("ಸಾರಾಂಶ ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ", download_labels)
 
     def test_microphone_is_shown_after_summary_exists(self):
         app = AppTest.from_file(str(APP_PATH)).run(timeout=15)
@@ -75,14 +77,15 @@ class AppTests(unittest.TestCase):
             "detected_languages": {},
         }
         app.session_state["summary_result"] = "ಕನ್ನಡ ಸಾರಾಂಶ"
-        app.run(timeout=15)
+        with patch("tts.synthesize_speech", return_value=b"audio"):
+            app.run(timeout=15)
 
         self.assertEqual(len(app.audio_input), 1)
 
     def test_summary_error_is_shown_in_streamlit(self):
         app = AppTest.from_file(str(APP_PATH)).run(timeout=15)
         app.session_state["ocr_result"] = {
-            "text": "ಪತ್ರದ ಪಠ್ಯ",
+            "text": "ಪತ್ರದ ದೋಷ ಪರೀಕ್ಷೆ",
             "words": [],
             "detected_languages": {},
         }
@@ -95,6 +98,57 @@ class AppTests(unittest.TestCase):
             app.button[0].click().run(timeout=15)
 
         self.assertIn("GEMINI_API_KEY ಹೊಂದಿಸಿ", [message.value for message in app.error])
+
+    def test_summary_tts_uses_normalized_text(self):
+        app = AppTest.from_file(str(APP_PATH)).run(timeout=15)
+        app.session_state["ocr_result"] = {
+            "text": "ಪತ್ರದ ಪಠ್ಯ",
+            "words": [],
+            "detected_languages": {},
+        }
+        app.session_state["summary_result"] = "ವಿಶಿಷ್ಟ ಮೂಲ ಸಾರಾಂಶ 7 ದಿನಗಳು"
+        with (
+            patch(
+                "tts_normalizer.normalize_for_tts",
+                return_value="ವಿಶಿಷ್ಟ ಮಾತಿನ ಸಾರಾಂಶ",
+            ),
+            patch("tts.synthesize_speech", return_value=b"audio") as synthesize,
+        ):
+            app.run(timeout=15)
+            next(button for button in app.button if button.label == "ಕೇಳಿ").click()
+            app.run(timeout=15)
+
+        synthesize.assert_called_once_with(
+            "ವಿಶಿಷ್ಟ ಮಾತಿನ ಸಾರಾಂಶ", voice="Shivani", speed=1.0
+        )
+
+    def test_answer_tts_uses_normalized_text(self):
+        app = AppTest.from_file(str(APP_PATH)).run(timeout=15)
+        app.session_state["ocr_result"] = {
+            "text": "ಪತ್ರದ ಪಠ್ಯ",
+            "words": [],
+            "detected_languages": {},
+        }
+        app.session_state["summary_result"] = "ಸಾರಾಂಶ"
+        app.session_state["qa_ocr_text"] = "ಪತ್ರದ ಪಠ್ಯ"
+        app.session_state["conversation"] = [
+            {"question": "ಪ್ರಶ್ನೆ", "answer": "ಮೂಲ ಉತ್ತರ 10:00"}
+        ]
+        with (
+            patch(
+                "tts_normalizer.normalize_for_tts",
+                side_effect=lambda text: (
+                    "ಮಾತಿನ ಸಾರಾಂಶ" if text == "ಸಾರಾಂಶ" else "ಮಾತಿನ ಪಠ್ಯ"
+                ),
+            ),
+            patch("tts.synthesize_speech", return_value=b"audio") as synthesize,
+        ):
+            app.run(timeout=15)
+            next(button for button in app.button if button.label == "ಉತ್ತರ ಕೇಳಿ").click()
+            app.run(timeout=15)
+
+        self.assertEqual(synthesize.call_count, 2)
+        synthesize.assert_any_call("ಮಾತಿನ ಪಠ್ಯ", voice="Shivani", speed=1.0)
 
 
 if __name__ == "__main__":

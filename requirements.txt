@@ -1,6 +1,7 @@
 requests
 python-dotenv
 pillow
+PyMuPDF
 streamlit
 google-genai
 httpx
